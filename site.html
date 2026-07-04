@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OBS·SGR — Simulador de Lente Gravitacional</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="layout.css">
+</head>
+<body>
+
+  <div class="rig">
+
+    <header class="rig__topbar">
+      <div class="brand">
+        <span class="brand__eyebrow">OBS·SGR</span>
+        <span class="brand__title">Simulador de Lente Gravitacional</span>
+      </div>
+      <div class="status">
+        <span class="status__dot"></span>
+        <span id="fps">RENDER 0 FPS</span>
+      </div>
+    </header>
+
+    <!-- Área dedicada exclusivamente à visualização do buraco negro -->
+    <div class="rig__frame" id="frame">
+      <canvas id="bh-canvas" width="1920" height="1080"></canvas>
+      <div class="scanlines"></div>
+      <div class="vignette"></div>
+      <div class="rivet rivet--tl"></div>
+      <div class="rivet rivet--tr"></div>
+      <div class="rivet rivet--bl"></div>
+      <div class="rivet rivet--br"></div>
+      <div class="hud hud--watermark">arraste para orbitar · role para zoom</div>
+    </div>
+
+    <!-- Telemetria: fica fora da área de visualização, não polui a imagem -->
+    <div class="telemetry">
+      <div class="telemetry__item">
+        <span class="telemetry__label">Raio de Schwarzschild</span>
+        <span class="telemetry__value" id="t-rs">—</span>
+      </div>
+      <div class="telemetry__item">
+        <span class="telemetry__label">Parâmetro de impacto crítico</span>
+        <span class="telemetry__value" id="t-bcrit">2.598 Rs</span>
+      </div>
+      <div class="telemetry__item">
+        <span class="telemetry__label">Fótons simulados/quadro</span>
+        <span class="telemetry__value" id="t-active">—</span>
+      </div>
+      <div class="telemetry__item">
+        <span class="telemetry__label">Capturas / s</span>
+        <span class="telemetry__value telemetry__value--ember" id="t-captured">—</span>
+      </div>
+      <div class="telemetry__item">
+        <span class="telemetry__label">Método de integração</span>
+        <span class="telemetry__value">Verlet · 6 subpassos</span>
+      </div>
+    </div>
+
+    <div class="rig__controls">
+      <div class="ctrl">
+        <div class="ctrl__head">
+          <span class="ctrl__label">Massa</span>
+          <span class="ctrl__value" id="v-mass">10.0 M☉</span>
+        </div>
+        <input type="range" id="s-mass" min="1" max="50" step="0.5" value="10">
+        <span class="ctrl__hint">Reescala os valores físicos — a geometria é sempre normalizada por Rs</span>
+      </div>
+
+      <div class="ctrl">
+        <div class="ctrl__head">
+          <span class="ctrl__label">Nº de fótons</span>
+          <span class="ctrl__value" id="v-count">6000</span>
+        </div>
+        <input type="range" id="s-count" min="500" max="50000" step="500" value="6000">
+        <div class="ctrl__custom">
+          <input type="number" id="s-count-custom" min="1" step="1" value="6000" placeholder="valor personalizado">
+          <button type="button" id="s-count-apply">Aplicar</button>
+        </div>
+        <span class="ctrl__hint">Cada ponto é uma partícula de luz integrada individualmente — sem teto fixo, mas números muito altos custam FPS</span>
+      </div>
+
+      <div class="ctrl">
+        <div class="ctrl__head">
+          <span class="ctrl__label">Velocidade da simulação</span>
+          <span class="ctrl__value" id="v-speed">1.0×</span>
+        </div>
+        <input type="range" id="s-speed" min="0.1" max="3" step="0.1" value="1">
+        <span class="ctrl__hint">Multiplica o passo de tempo da integração</span>
+      </div>
+
+      <div class="ctrl">
+        <div class="ctrl__head">
+          <span class="ctrl__label">Disco de acréscimo</span>
+          <span class="ctrl__value" id="v-disk">ligado</span>
+        </div>
+        <input type="range" id="s-disk" min="0" max="1" step="1" value="1">
+        <span class="ctrl__hint">Matéria em órbita kepleriana, ω = √(GM/r³)</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="foot">
+    <span>Geodésica nula de Schwarzschild · d²x/dλ² = −1.5·h²·x/r⁵ (h = x × v conservado) · unidades G = c = 1</span>
+    <span>1920 × 1080 · WebGL / Three.js</span>
+  </div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://esm.sh/three@0.160.0",
+    "three/examples/jsm/controls/OrbitControls.js": "https://esm.sh/three@0.160.0/examples/jsm/controls/OrbitControls.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+
+/* =========================================================
+   Constantes físicas (unidades geometrizadas: Rs = 1, G = c = 1)
+   GM = Rs/2  ⇒  GM = 0.5
+   b_crit (parâmetro de impacto crítico do fóton) = 3√3 · GM = 3√3/2 · Rs
+   ========================================================= */
+const RS = 1.0;
+const GM = 0.5;
+const B_CRIT = 1.5 * Math.sqrt(3) * RS; // ≈ 2.598
+
+const RS_SUN_KM = 2.95325;
+
+function fmt(n, d = 2){
+  if (Math.abs(n) >= 1000 || (Math.abs(n) < 0.01 && n !== 0)) return n.toExponential(d);
+  return n.toFixed(d);
+}
+
+function updateMassReadouts(){
+  const M = parseFloat(document.getElementById('s-mass').value);
+  document.getElementById('v-mass').textContent = `${M.toFixed(1)} M☉`;
+  document.getElementById('t-rs').textContent = `${fmt(RS_SUN_KM * M)} km`;
+}
+
+/* =========================================================
+   Cena Three.js
+   ========================================================= */
+const canvas = document.getElementById('bh-canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(1);
+renderer.setSize(1920, 1080, false);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, 1920 / 1080, 0.05, 300);
+camera.position.set(0, 6.5, 21);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.minDistance = 3.5;
+controls.maxDistance = 70;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.35;
+controls.addEventListener('start', () => { controls.autoRotate = false; });
+
+/* ---------- Horizonte de eventos + esfera de fótons (referência) ---------- */
+const horizon = new THREE.Mesh(
+  new THREE.SphereGeometry(RS, 64, 64),
+  new THREE.MeshBasicMaterial({ color: 0x000000 })
+);
+scene.add(horizon);
+
+const photonRing = new THREE.Mesh(
+  new THREE.TorusGeometry(1.5 * RS, 0.004, 8, 128),
+  new THREE.MeshBasicMaterial({ color: 0x8fe3d1, transparent: true, opacity: 0.18 })
+);
+photonRing.rotation.x = Math.PI / 2;
+scene.add(photonRing);
+
+/* ---------- textura de ponto suave (sprite do fóton) ---------- */
+function makeDotTexture(){
+  const s = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = s;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(s/2, s/2, 0, s/2, s/2, s/2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.4, 'rgba(255,255,255,0.7)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, s, s);
+  return new THREE.CanvasTexture(c);
+}
+const dotTex = makeDotTexture();
+
+/* =========================================================
+   FÓTONS — cada ponto é integrado individualmente
+   Equação (geodésica nula de Schwarzschild, forma vetorial):
+     a = -1.5 · h² · x / |x|⁵ ,   h = x₀ × v₀ (conservado)
+   ========================================================= */
+let N_PHOTONS = 6000;
+const D_SPAWN = 30;   // raio da casca de onde os fótons partem
+const D_MAX   = 34;   // raio de contorno: além disso, reinicia o fóton
+const MAX_B   = 11.5; // parâmetro de impacto máximo amostrado
+
+let pPos, pVel, pH2, geoPhoton, matPhoton, photonPoints;
+
+// vetor unitário uniformemente distribuído sobre a esfera (Marsaglia)
+function randomUnitVector(out){
+  const u = Math.random() * 2 - 1;
+  const theta = Math.random() * Math.PI * 2;
+  const s = Math.sqrt(1 - u * u);
+  out[0] = s * Math.cos(theta);
+  out[1] = s * Math.sin(theta);
+  out[2] = u;
+  return out;
+}
+
+// dois vetores unitários ortogonais entre si e a d (base do plano perpendicular)
+const _h = [0,0,0], _p1 = [0,0,0], _p2 = [0,0,0];
+function perpBasis(d){
+  if (Math.abs(d[1]) > 0.9){ _h[0]=1; _h[1]=0; _h[2]=0; }
+  else { _h[0]=0; _h[1]=1; _h[2]=0; }
+
+  _p1[0] = d[1]*_h[2] - d[2]*_h[1];
+  _p1[1] = d[2]*_h[0] - d[0]*_h[2];
+  _p1[2] = d[0]*_h[1] - d[1]*_h[0];
+  const len = Math.hypot(_p1[0], _p1[1], _p1[2]);
+  _p1[0] /= len; _p1[1] /= len; _p1[2] /= len;
+
+  _p2[0] = d[1]*_p1[2] - d[2]*_p1[1];
+  _p2[1] = d[2]*_p1[0] - d[0]*_p1[2];
+  _p2[2] = d[0]*_p1[1] - d[1]*_p1[0];
+}
+
+const _d = [0,0,0];
+
+function respawnPhoton(i){
+  // fóton chega de uma direção 3D aleatória (céu isotrópico), deslocado
+  // por um parâmetro de impacto b num plano perpendicular à sua trajetória
+  randomUnitVector(_d);
+  perpBasis(_d);
+
+  const b = Math.sqrt(Math.random()) * MAX_B;
+  const ang = Math.random() * Math.PI * 2;
+  const ca = Math.cos(ang) * b, sa = Math.sin(ang) * b;
+
+  const ox = _p1[0]*ca + _p2[0]*sa;
+  const oy = _p1[1]*ca + _p2[1]*sa;
+  const oz = _p1[2]*ca + _p2[2]*sa;
+
+  const x = -_d[0]*D_SPAWN + ox;
+  const y = -_d[1]*D_SPAWN + oy;
+  const z = -_d[2]*D_SPAWN + oz;
+
+  pPos[i*3+0] = x; pPos[i*3+1] = y; pPos[i*3+2] = z;
+  pVel[i*3+0] = _d[0]; pVel[i*3+1] = _d[1]; pVel[i*3+2] = _d[2];
+
+  // h = pos × vel (momento angular do fóton, conservado ao longo da geodésica)
+  const hx = y*_d[2] - z*_d[1];
+  const hy = z*_d[0] - x*_d[2];
+  const hz = x*_d[1] - y*_d[0];
+  pH2[i] = hx*hx + hy*hy + hz*hz;
+}
+
+function buildPhotonSystem(n){
+  N_PHOTONS = n;
+  pPos = new Float32Array(n * 3);
+  pVel = new Float32Array(n * 3);
+  pH2  = new Float32Array(n);
+
+  for (let i = 0; i < n; i++){
+    respawnPhoton(i);
+    // no instante inicial, avança cada fóton por um trecho aleatório de sua
+    // própria trajetória (linha reta) para preencher o volume, não só a casca
+    const ix = i*3;
+    const t = Math.random() * 2 * D_SPAWN;
+    pPos[ix+0] += pVel[ix+0] * t;
+    pPos[ix+1] += pVel[ix+1] * t;
+    pPos[ix+2] += pVel[ix+2] * t;
+  }
+
+  if (photonPoints){ scene.remove(photonPoints); geoPhoton.dispose(); matPhoton.dispose(); }
+
+  geoPhoton = new THREE.BufferGeometry();
+  geoPhoton.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+  const colors = new Float32Array(n * 3);
+  colors.fill(1.0);
+  geoPhoton.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  matPhoton = new THREE.PointsMaterial({
+    size: 0.3,
+    map: dotTex,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true,
+    sizeAttenuation: true,
+  });
+
+  photonPoints = new THREE.Points(geoPhoton, matPhoton);
+  scene.add(photonPoints);
+}
+buildPhotonSystem(N_PHOTONS);
+
+function stepPhotons(dt){
+  const colors = geoPhoton.attributes.color.array;
+  const substeps = 6;
+  const h = dt / substeps;
+  let captured = 0;
+
+  for (let i = 0; i < N_PHOTONS; i++){
+    const ix = i*3;
+    let x = pPos[ix], y = pPos[ix+1], z = pPos[ix+2];
+    let vx = pVel[ix], vy = pVel[ix+1], vz = pVel[ix+2];
+    const h2 = pH2[i];
+    let dead = false;
+
+    for (let s = 0; s < substeps; s++){
+      const r2 = x*x + y*y + z*z;
+      const r = Math.sqrt(r2);
+      if (r < RS){ dead = true; break; }
+
+      const invr5 = 1 / (r2 * r2 * r);
+      const k = -1.5 * h2 * invr5;
+      vx += k * x * h;
+      vy += k * y * h;
+      vz += k * z * h;
+      x += vx * h;
+      y += vy * h;
+      z += vz * h;
+    }
+
+    if (dead || x*x+y*y+z*z > D_MAX*D_MAX){
+      if (dead) captured++;
+      respawnPhoton(i);
+    } else {
+      pPos[ix] = x; pPos[ix+1] = y; pPos[ix+2] = z;
+      pVel[ix] = vx; pVel[ix+1] = vy; pVel[ix+2] = vz;
+
+      const r = Math.sqrt(x*x + y*y + z*z);
+      const t = Math.min(1, Math.max(0, 1 - (RS * 1.5) / r));
+      // longe: branco-azulado (luz de fundo) · perto do horizonte: redshift para laranja/vermelho
+      colors[ix]   = 0.85 + 0.15 * t;
+      colors[ix+1] = 0.55 + 0.40 * t;
+      colors[ix+2] = 0.35 + 0.65 * t;
+    }
+  }
+
+  geoPhoton.attributes.position.needsUpdate = true;
+  geoPhoton.attributes.color.needsUpdate = true;
+  return captured;
+}
+
+/* =========================================================
+   DISCO DE ACRÉSCIMO — órbitas keplerianas reais: ω = √(GM / r³)
+   ========================================================= */
+const N_DISK = 3200;
+const D_INNER = 3.0 * RS;
+const D_OUTER = 13.0 * RS;
+
+const dRadius = new Float32Array(N_DISK);
+const dAngle = new Float32Array(N_DISK);
+const dOmega = new Float32Array(N_DISK);
+const dHeight = new Float32Array(N_DISK);
+const dPos = new Float32Array(N_DISK * 3);
+const dColor = new Float32Array(N_DISK * 3);
+
+for (let i = 0; i < N_DISK; i++){
+  const r = D_INNER + Math.random() * (D_OUTER - D_INNER);
+  dRadius[i] = r;
+  dAngle[i] = Math.random() * Math.PI * 2;
+  dOmega[i] = Math.sqrt(GM / (r*r*r));       // velocidade angular kepleriana
+  dHeight[i] = (Math.random() - 0.5) * 0.10 * (r / D_OUTER + 0.2);
+
+  const t = (r - D_INNER) / (D_OUTER - D_INNER);
+  dColor[i*3+0] = 1.0;
+  dColor[i*3+1] = 0.95 - 0.55*t;
+  dColor[i*3+2] = 0.85 - 0.80*t;
+}
+
+const geoDisk = new THREE.BufferGeometry();
+geoDisk.setAttribute('position', new THREE.BufferAttribute(dPos, 3));
+geoDisk.setAttribute('color', new THREE.BufferAttribute(dColor, 3));
+const matDisk = new THREE.PointsMaterial({
+  size: 0.15,
+  map: dotTex,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexColors: true,
+  sizeAttenuation: true,
+});
+const diskPoints = new THREE.Points(geoDisk, matDisk);
+scene.add(diskPoints);
+
+function stepDisk(dt){
+  for (let i = 0; i < N_DISK; i++){
+    dAngle[i] += dOmega[i] * dt;
+    const r = dRadius[i];
+    const a = dAngle[i];
+    dPos[i*3+0] = r * Math.cos(a);
+    dPos[i*3+1] = dHeight[i];
+    dPos[i*3+2] = r * Math.sin(a);
+  }
+  geoDisk.attributes.position.needsUpdate = true;
+}
+
+/* =========================================================
+   Controles de UI
+   ========================================================= */
+document.getElementById('s-mass').addEventListener('input', updateMassReadouts);
+updateMassReadouts();
+
+document.getElementById('s-count').addEventListener('input', e => {
+  const n = parseInt(e.target.value, 10);
+  document.getElementById('v-count').textContent = n;
+  document.getElementById('s-count-custom').value = n;
+  buildPhotonSystem(n);
+});
+
+function applyCustomCount(){
+  const raw = document.getElementById('s-count-custom').value;
+  const n = Math.max(1, parseInt(raw, 10) || 0);
+  document.getElementById('v-count').textContent = n;
+  const slider = document.getElementById('s-count');
+  slider.value = Math.min(n, parseInt(slider.max, 10));
+  buildPhotonSystem(n);
+}
+document.getElementById('s-count-apply').addEventListener('click', applyCustomCount);
+document.getElementById('s-count-custom').addEventListener('keydown', e => {
+  if (e.key === 'Enter') applyCustomCount();
+});
+
+let speedMult = 1.0;
+document.getElementById('s-speed').addEventListener('input', e => {
+  speedMult = parseFloat(e.target.value);
+  document.getElementById('v-speed').textContent = `${speedMult.toFixed(1)}×`;
+});
+
+document.getElementById('s-disk').addEventListener('input', e => {
+  const on = e.target.value === '1';
+  diskPoints.visible = on;
+  document.getElementById('v-disk').textContent = on ? 'ligado' : 'desligado';
+});
+
+/* =========================================================
+   Loop principal
+   ========================================================= */
+let last = performance.now();
+let fpsAccum = 0, fpsCount = 0, fpsTimer = 0;
+let capAccum = 0, capTimer = 0;
+
+function animate(now){
+  const dtReal = Math.min((now - last) / 1000, 1/20);
+  last = now;
+  const dt = dtReal * speedMult;
+
+  controls.update();
+  const captured = stepPhotons(dt);
+  stepDisk(dt);
+  renderer.render(scene, camera);
+
+  capAccum += captured;
+  capTimer += dtReal;
+  if (capTimer > 1){
+    document.getElementById('t-captured').textContent = `${Math.round(capAccum / capTimer)} /s`;
+    capAccum = 0; capTimer = 0;
+  }
+
+  fpsAccum += dtReal; fpsCount++; fpsTimer += dtReal;
+  if (fpsTimer > 0.5){
+    document.getElementById('fps').textContent = `RENDER ${(fpsCount/fpsAccum).toFixed(0)} FPS`;
+    document.getElementById('t-active').textContent = `${N_PHOTONS + N_DISK}`;
+    fpsAccum = 0; fpsCount = 0; fpsTimer = 0;
+  }
+
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
+
